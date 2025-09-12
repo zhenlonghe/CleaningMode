@@ -9,6 +9,19 @@ import SwiftUI
 import Combine
 import AppKit
 
+// MARK: - User Preferences
+class UserPreferences: ObservableObject {
+    @Published var dontShowPermissionGuide: Bool {
+        didSet {
+            UserDefaults.standard.set(dontShowPermissionGuide, forKey: "dontShowPermissionGuide")
+        }
+    }
+    
+    init() {
+        self.dontShowPermissionGuide = UserDefaults.standard.bool(forKey: "dontShowPermissionGuide")
+    }
+}
+
 // MARK: - Aphorism Provider
 struct AphorismProvider {
     private static let phrases: [String] = [
@@ -45,9 +58,17 @@ struct AphorismProvider {
     static func current() -> String { cached }
 }
 
+// MARK: - App State
+enum AppState {
+    case permissionGuide
+    case cleaningMode
+}
+
 // MARK: - ContentView
 struct ContentView: View {
     var isAuxiliary: Bool = false
+    @StateObject private var userPreferences = UserPreferences()
+    @State private var appState: AppState = .permissionGuide
     @State private var isCommandHeld: Bool = false
     @State private var isEscapeHeld: Bool = false
     @State private var exitProgress: Double = 0
@@ -58,6 +79,59 @@ struct ContentView: View {
     private let requiredHoldSeconds: Double = 0.6
 
     var body: some View {
+        Group {
+            if isAuxiliary {
+                cleaningModeView
+            } else {
+                switch appState {
+                case .permissionGuide:
+                    permissionGuideView
+                case .cleaningMode:
+                    cleaningModeView
+                }
+            }
+        }
+        .onAppear {
+            if !isAuxiliary {
+                checkInitialState()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            if !isAuxiliary {
+                // Refresh permission state when app becomes active
+                checkInitialState()
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var permissionGuideView: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color(.windowBackgroundColor)
+                    .ignoresSafeArea()
+                
+                PermissionGuideCard(
+                    onStartCleaning: {
+                        enterCleaningMode()
+                    },
+                    onStartLimited: {
+                        enterCleaningMode()
+                    },
+                    onDontShowAgain: { dontShow in
+                        userPreferences.dontShowPermissionGuide = dontShow
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .onAppear {
+            centerSmallWindowIfNeeded()
+        }
+    }
+    
+    @ViewBuilder
+    private var cleaningModeView: some View {
         GeometryReader { proxy in
             ZStack {
                 // Solid black background (fully opaque)
@@ -110,15 +184,14 @@ struct ContentView: View {
             .overlay(
                 Group {
                     if !isAuxiliary {
-                        // Install NSEvent monitors and swallow keys (only once)
-                        KeyboardInterceptor(
-                            onFlagsChanged: { flags in
-                                isCommandHeld = flags.contains(.command)
+                        // Install global CGEvent tap and swallow keys (only once)
+                        KeyboardLockViewBinder(
+                            onCommandChanged: { held in
+                                isCommandHeld = held
                                 updateHoldState()
                             },
                             onKeyDown: { keyCode in
-                                // 53 is Escape on macOS
-                                if keyCode == 53 {
+                                if keyCode == 53 { // esc
                                     isEscapeHeld = true
                                     updateHoldState()
                                 }
@@ -181,12 +254,46 @@ struct ContentView: View {
         }
     }
 
+    private func checkInitialState() {
+        let hasAX = KeyboardLockManager.shared.hasAccessibilityPermission()
+        let shouldShowGuide = !userPreferences.dontShowPermissionGuide && !hasAX
+        
+        if shouldShowGuide {
+            appState = .permissionGuide
+        } else {
+            enterCleaningMode()
+        }
+    }
+    
+    private func enterCleaningMode() {
+        appState = .cleaningMode
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            presentAcrossAllScreensIfNeeded()
+        }
+    }
+    
     private func presentAcrossAllScreensIfNeeded() {
         guard !hasRequestedFullscreen else { return }
         hasRequestedFullscreen = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             MultiDisplayManager.shared.setupAllScreens()
         }
+    }
+
+    private func centerSmallWindowIfNeeded(width: CGFloat = 520, height: CGFloat = 420) {
+        guard let window = NSApp.keyWindow ?? NSApp.windows.first, let screen = window.screen ?? NSScreen.main else { return }
+        let targetSize = NSSize(width: width, height: height)
+        let originX = screen.frame.midX - targetSize.width / 2
+        let originY = screen.frame.midY - targetSize.height / 2
+        let rect = NSRect(x: originX, y: originY, width: targetSize.width, height: targetSize.height)
+        window.level = .normal
+        window.hasShadow = true
+        window.isOpaque = true
+        window.backgroundColor = NSColor.windowBackgroundColor
+        window.styleMask.remove(.fullScreen)
+        window.styleMask.remove(.resizable)
+        window.setFrame(rect, display: true, animate: true)
+        window.orderFrontRegardless()
     }
 }
 
@@ -258,7 +365,30 @@ private struct Sparkle: Identifiable {
     }
 }
 
-// MARK: - NSEvent Interceptor
+// MARK: - Keyboard Binder
+private struct KeyboardLockViewBinder: NSViewRepresentable {
+    var onCommandChanged: (Bool) -> Void
+    var onKeyDown: (UInt16) -> Void
+    var onKeyUp: (UInt16) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        let mgr = KeyboardLockManager.shared
+        mgr.onFlagsChanged = onCommandChanged
+        mgr.onKeyDown = onKeyDown
+        mgr.onKeyUp = onKeyUp
+        mgr.start()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        KeyboardLockManager.shared.stop()
+    }
+}
+
+// MARK: - NSEvent Interceptor (legacy, unused)
 private struct KeyCap: View {
     let label: String
     var body: some View {
@@ -396,6 +526,87 @@ final class MultiDisplayManager {
     func closeAuxiliaryWindows() {
         auxiliaryWindows.forEach { $0.close() }
         auxiliaryWindows.removeAll()
+    }
+}
+
+// MARK: - Permission Guide Card (minimal)
+struct PermissionGuideCard: View {
+    @State private var hasAX: Bool = false
+    let onStartCleaning: () -> Void
+    let onStartLimited: () -> Void
+    let onDontShowAgain: (Bool) -> Void
+
+    private func refresh() {
+        hasAX = KeyboardLockManager.shared.hasAccessibilityPermission()
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            // App icon + title
+            if let icon = NSApp.applicationIconImage {
+                Image(nsImage: icon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 56, height: 56)
+                    .cornerRadius(12)
+            }
+            Text("Cleaning Mode")
+                .font(.system(size: 22, weight: .bold))
+            Text("Grant Accessibility to start cleaning")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            VStack(spacing: 12) {
+                Button(action: { 
+                    if hasAX {
+                        onStartCleaning()
+                    } else {
+                        // Directly open system settings without showing permission dialog
+                        KeyboardLockManager.shared.openAccessibilitySettings()
+                    }
+                }) {
+                    Text(hasAX ? "Start Cleaning" : "Grant Key Block Permission")
+                        .frame(minWidth: 200, maxWidth: 280)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button(action: {
+                    onDontShowAgain(true)
+                    onStartLimited()
+                }) {
+                    Text("Skip and don't show this again")
+                        .frame(minWidth: 200, maxWidth: 280)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: 460)
+        .onAppear { refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+    }
+}
+
+private struct PermissionRow: View {
+    let title: String
+    let subtitle: String
+    let granted: Bool
+    let onOpen: () -> Void
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundColor(granted ? .green : .orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(subtitle).font(.system(size: 12)).foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: onOpen) { Text("Open") }
+                .buttonStyle(.link)
+        }
     }
 }
 

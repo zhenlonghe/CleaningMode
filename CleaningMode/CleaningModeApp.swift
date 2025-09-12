@@ -15,5 +15,6 @@ struct CleaningModeApp: App {
                 .ignoresSafeArea()
         }
         .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 520, height: 420)
     }
 }
