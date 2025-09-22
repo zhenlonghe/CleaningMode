@@ -78,6 +78,18 @@ struct ContentView: View {
 
     private let requiredHoldSeconds: Double = 0.6
 
+    init(isAuxiliary: Bool = false) {
+        self.isAuxiliary = isAuxiliary
+        // Decide initial state as early as possible to avoid small-to-large flicker.
+        if !isAuxiliary {
+            let hasAX = KeyboardLockManager.shared.hasAccessibilityPermission()
+            let shouldShowGuide = !UserDefaults.standard.bool(forKey: "dontShowPermissionGuide") && !hasAX
+            _appState = State(initialValue: shouldShowGuide ? .permissionGuide : .cleaningMode)
+        } else {
+            _appState = State(initialValue: .cleaningMode)
+        }
+    }
+
     var body: some View {
         Group {
             if isAuxiliary {
@@ -91,11 +103,7 @@ struct ContentView: View {
                 }
             }
         }
-        .onAppear {
-            if !isAuxiliary {
-                checkInitialState()
-            }
-        }
+        .onAppear { }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if !isAuxiliary {
                 // Refresh permission state when app becomes active
@@ -267,17 +275,13 @@ struct ContentView: View {
     
     private func enterCleaningMode() {
         appState = .cleaningMode
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            presentAcrossAllScreensIfNeeded()
-        }
+        presentAcrossAllScreensIfNeeded()
     }
     
     private func presentAcrossAllScreensIfNeeded() {
         guard !hasRequestedFullscreen else { return }
         hasRequestedFullscreen = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            MultiDisplayManager.shared.setupAllScreens()
-        }
+        MultiDisplayManager.shared.setupAllScreens()
     }
 
     private func centerSmallWindowIfNeeded(width: CGFloat = 520, height: CGFloat = 420) {
